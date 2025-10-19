@@ -10,7 +10,7 @@ Required libraries: `pip install sherpa-onnx wyoming numpy`
 
 Example launch for Windows:
 ```
-python -m wyoming_streaming_asr --model-dir "\models\vosk-ru" --language ru --debug --command-file commands.txt --command-max-words 5
+python -m wyoming_streaming_asr --model-dir "\models\vosk-ru" --language ru --command-file commands.txt --command-max-words 5
 ```
 
 
