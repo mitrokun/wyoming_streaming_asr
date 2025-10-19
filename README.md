@@ -12,4 +12,4 @@ python -m wyoming_streaming_asr --model-dir "\models\vosk-ru" --language ru --de
 ```
 
 
-Latest Russian models from AlphaCeph https://huggingface.co/alphacep/
+Latest Russian models from Alpha Cephei https://huggingface.co/alphacep/
