@@ -6,6 +6,8 @@ Command dictionary [optional] - if specified, after recognizing `command-max-wor
 
 The model directory must contain 4 files: `encoder.onnx decoder.onnx joiner.onnx tokens.txt `
 
+Required libraries: `pip install sherpa-onnx wyoming numpy`
+
 Example launch for Windows:
 ```
 python -m wyoming_streaming_asr --model-dir "\models\vosk-ru" --language ru --debug --command-file commands.txt --command-max-words 5
