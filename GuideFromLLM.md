@@ -22,17 +22,17 @@ The model directory (`models/kroko`) is in the repository and contains `encoder.
 
 ## _Preparing the Kroko Model_
 
-## Prerequisites
+### Prerequisites
 - Project cloned (`wyoming_streaming_asr`) with `models/kroko` folder (may be empty).
 
-## Step 1: Manually Download Model Files
+### Step 1: Manually Download Model Files
 1. Go to [https://huggingface.co/Banafo/Kroko-ASR/tree/main](https://huggingface.co/Banafo/Kroko-ASR/tree/main) in your browser.
 2. Choose your language (e.g., German, English, Spanish—Kroko supports multiple languages).
 3. Download data model file (64 or 128) into `wyoming_streaming_asr/models/kroko`:
    - Click file, hit "Download", and save to `models/kroko` in your project folder.
    - Ensure `enc.py` is in the project root or `models/kroko`.
 
-### Step 2: Run enc.py
+### Step 2: Go to the directory and run enc.py
 1. Run:
    - **Windows/Linux**:
      ```
