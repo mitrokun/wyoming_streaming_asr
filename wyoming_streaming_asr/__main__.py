@@ -32,7 +32,6 @@ async def main() -> None:
     parser.add_argument(
         "--uri", default="tcp://0.0.0.0:10303", help="URI for the server to listen on"
     )
-    # Hotwords arguments
     parser.add_argument(
         "--hotwords-file",
         default="",
@@ -43,6 +42,12 @@ async def main() -> None:
         type=float,
         default=3.0,
         help="Boosting score for hotwords.",
+    )
+    parser.add_argument(
+        "--decoding-method",
+        default="modified_beam_search",
+        choices=["greedy_search", "modified_beam_search"],
+        help="Decoding method. Use 'greedy_search' for Parakeet/NeMo models, 'modified_beam_search' for Zipformer.",
     )
     parser.add_argument(
         "--bpe-vocab",
@@ -119,7 +124,7 @@ async def main() -> None:
             joiner=str(joiner_path),
             num_threads=4,
             sample_rate=16000,
-            decoding_method="modified_beam_search",
+            decoding_method=args.decoding_method,
             hotwords_file=args.hotwords_file,
             hotwords_score=args.hotwords_score,
             bpe_vocab=args.bpe_vocab,
