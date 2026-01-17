@@ -1,5 +1,3 @@
-# file: asr_stream/handler.py
-
 import argparse
 import asyncio
 import logging
@@ -17,6 +15,35 @@ from sherpa_onnx import OnlineRecognizer
 
 _LOGGER = logging.getLogger(__name__)
 EXPECTED_SAMPLE_RATE = 16000
+
+
+class StreamAGC:
+    """Simple Automatic Gain Control for streaming audio."""
+    def __init__(self, target_level=0.7, max_gain=30.0, min_gain=1.0):
+        self.target_level = target_level
+        self.max_gain = max_gain
+        self.min_gain = min_gain
+        self.current_peak_envelope = 0.05  # Start assuming low volume
+
+    def process(self, audio_chunk: np.ndarray) -> np.ndarray:
+        if len(audio_chunk) == 0:
+            return audio_chunk
+
+        chunk_max = np.max(np.abs(audio_chunk))
+        
+        # Fast attack, slow release
+        if chunk_max > self.current_peak_envelope:
+            alpha = 0.5
+        else:
+            alpha = 0.01
+
+        self.current_peak_envelope = (1 - alpha) * self.current_peak_envelope + alpha * chunk_max
+        safe_envelope = max(self.current_peak_envelope, 1e-6)
+
+        target_gain = self.target_level / safe_envelope
+        final_gain = np.clip(target_gain, self.min_gain, self.max_gain)
+
+        return np.tanh(audio_chunk * final_gain)
 
 
 class SherpaOnnxEventHandler(AsyncEventHandler):
@@ -44,8 +71,8 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
         self.stream = None
         self.last_stable_text = ""
         self.command_recognized = False
-        self.check_performed = False # Flag that the one-time check has been performed
-        _LOGGER.debug("Event handler initialized")
+        self.check_performed = False
+        self.agc = StreamAGC(target_level=0.7, max_gain=30.0)
 
     async def handle_event(self, event: Event) -> bool:
         """Main method for handling incoming events."""
@@ -56,11 +83,7 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
         if AudioStart.is_type(event.type):
             audio_start = AudioStart.from_event(event)
             if audio_start.rate != EXPECTED_SAMPLE_RATE:
-                _LOGGER.warning(
-                    "Unexpected sample rate: %s. The model expects %s.",
-                    audio_start.rate,
-                    EXPECTED_SAMPLE_RATE,
-                )
+                _LOGGER.warning("Unexpected sample rate: %s", audio_start.rate)
             await self._handle_audio_start()
             return True
         if AudioChunk.is_type(event.type):
@@ -76,13 +99,14 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
 
     async def _handle_audio_start(self) -> None:
         """Resets the state for a new phrase."""
-        _LOGGER.debug("Audio stream started. Creating new recognition stream.")
+        _LOGGER.debug("Audio stream started.")
         self.stream = self.recognizer.create_stream()
         self.last_stable_text = ""
         self.command_recognized = False
-        self.check_performed = False # Reset the flag
+        self.check_performed = False
+        # Reset AGC for new phrase
+        self.agc = StreamAGC(target_level=0.7, max_gain=30.0)
         await self.write_event(TranscriptStart(language=self.language).event())
-        _LOGGER.debug("Sent TranscriptStart.")
 
     async def _finalize_recognition(self, text: str) -> None:
         """Sends the final result and ends the session."""
@@ -92,7 +116,6 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
         _LOGGER.info("Final result: '%s'", final_text)
         await self.write_event(Transcript(text=final_text).event())
         await self.write_event(TranscriptStop().event())
-        _LOGGER.debug("Sent final Transcript and TranscriptStop.")
         self.stream = None
         self.command_recognized = True
 
@@ -117,6 +140,10 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
         try:
             samples_int16 = np.frombuffer(audio_chunk_bytes, dtype=np.int16)
             samples_float32 = samples_int16.astype(np.float32) / 32768.0
+            
+            # Apply AGC
+            samples_float32 = self.agc.process(samples_float32)
+
             self.stream.accept_waveform(EXPECTED_SAMPLE_RATE, samples_float32)
             while self.recognizer.is_ready(self.stream):
                 self.recognizer.decode_stream(self.stream)
@@ -129,20 +156,16 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
             words = current_full_text.split()
             stable_words = words[:-1] if len(words) > 1 else words
 
-            # --- ONE-TIME CHECK LOGIC ---
             if self.sorted_commands and not self.check_performed and self.command_max_words > 0:
-                stable_word_count = len(stable_words)
-                if stable_word_count >= self.command_max_words:
-                    _LOGGER.debug("Stable word count threshold of %s reached, triggering one-time check.", self.command_max_words)
+                if len(stable_words) >= self.command_max_words:
                     self.check_performed = True
                     
                     matched_command = self._check_for_command(current_full_text)
                     if matched_command:
-                        _LOGGER.debug("Command '%s' matched during streaming. Stopping immediately.", matched_command)
+                        _LOGGER.debug("Command matched (stream): '%s'", matched_command)
                         await self._finalize_recognition(matched_command)
                         return
 
-            # --- INTERMEDIATE RESULTS LOGIC ---
             if not self.command_recognized:
                 current_stable_text = " ".join(stable_words)
                 if current_stable_text and current_stable_text != self.last_stable_text:
@@ -161,26 +184,24 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
         if self.stream is None or self.command_recognized:
             return
 
-        _LOGGER.debug("End of audio stream. Getting final result.")
-        tail_padding = np.zeros(int(EXPECTED_SAMPLE_RATE * 0.4), dtype=np.float32)
+        _LOGGER.debug("End of audio stream.")
+        # Padding 0.3s
+        tail_padding = np.zeros(int(EXPECTED_SAMPLE_RATE * 0.3), dtype=np.float32)
         self.stream.accept_waveform(EXPECTED_SAMPLE_RATE, tail_padding)
         self.stream.input_finished()
+        
         while self.recognizer.is_ready(self.stream):
             self.recognizer.decode_stream(self.stream)
 
         final_text = self.recognizer.get_result(self.stream).strip()
         
-        # --- NEW DEBUG LOG ---
         _LOGGER.debug("Full final text for checking: '%s'", final_text)
 
         if not self.check_performed:
-            _LOGGER.debug("Performing final command check at the end of speech.")
             matched_command = self._check_for_command(final_text.lower())
             if matched_command:
-                # --- IMPROVED LOG MESSAGE ---
-                _LOGGER.debug("Command '%s' matched at the end of speech.", matched_command)
+                _LOGGER.debug("Command matched (final): '%s'", matched_command)
                 await self._finalize_recognition(matched_command)
                 return
 
-        # If no command was ever found, send the full text.
         await self._finalize_recognition(final_text)
