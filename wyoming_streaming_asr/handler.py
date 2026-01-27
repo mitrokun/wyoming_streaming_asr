@@ -18,19 +18,60 @@ EXPECTED_SAMPLE_RATE = 16000
 
 
 class StreamAGC:
-    """Simple Automatic Gain Control for streaming audio."""
-    def __init__(self, target_level=0.7, max_gain=30.0, min_gain=1.0):
+    """
+    Simple Automatic Gain Control with Auto-Calibration.
+    Detects if the source is already normalized (DSP) or quiet (raw mic).
+    """
+    def __init__(self, target_level=0.6, max_gain=30.0, min_gain=1.0):
         self.target_level = target_level
-        self.max_gain = max_gain
+        self.absolute_max_gain = max_gain
         self.min_gain = min_gain
-        self.current_peak_envelope = 0.05  # Start assuming low volume
+        
+        # Start with target_level to prevent noise bursts during calibration
+        self.current_peak_envelope = target_level 
+
+        # Calibration state
+        self.calib_peak = 0.0
+        self.calib_frames = 12
+        self.is_calibrated = False
+        
+        # Threshold to detect pre-processed signals (-30dB for RespeakerLite)
+        # Record audio and check the silence level on your device 
+        self.dsp_threshold = 0.031 
+        
+        # Default to safe mode (gain x1.0) until proven otherwise
+        self.active_max_gain = 1.0 
 
     def process(self, audio_chunk: np.ndarray) -> np.ndarray:
         if len(audio_chunk) == 0:
             return audio_chunk
 
         chunk_max = np.max(np.abs(audio_chunk))
-        
+
+        # === 1. Calibration Phase ===
+        if self.calib_frames > 0:
+            self.calib_peak = max(self.calib_peak, chunk_max)
+            self.calib_frames -= 1
+            return audio_chunk
+
+        # === 2. Source Type Detection (Run once) ===
+        if not self.is_calibrated:
+            if self.calib_peak > self.dsp_threshold:
+                # Loud source (DSP detected): Disable amplification
+                self.active_max_gain = 1.0
+            else:
+                # Quiet source (Raw Mic): Enable full gain
+                self.active_max_gain = self.absolute_max_gain
+                # Reset envelope to low value for immediate reaction
+                self.current_peak_envelope = 0.1
+            
+            self.is_calibrated = True
+
+        # === 3. DSP Bypass ===
+        if self.active_max_gain <= 1.0:
+            return np.clip(audio_chunk, -1.0, 1.0)
+
+        # === 4. AGC Logic ===
         # Fast attack, slow release
         if chunk_max > self.current_peak_envelope:
             alpha = 0.5
@@ -41,7 +82,7 @@ class StreamAGC:
         safe_envelope = max(self.current_peak_envelope, 1e-6)
 
         target_gain = self.target_level / safe_envelope
-        final_gain = np.clip(target_gain, self.min_gain, self.max_gain)
+        final_gain = np.clip(target_gain, self.min_gain, self.active_max_gain)
 
         return np.tanh(audio_chunk * final_gain)
 
@@ -205,3 +246,4 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
                 return
 
         await self._finalize_recognition(final_text)
+
