@@ -226,8 +226,8 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
             return
 
         _LOGGER.debug("End of audio stream.")
-        # Padding 0.3s
-        tail_padding = np.zeros(int(EXPECTED_SAMPLE_RATE * 0.3), dtype=np.float32)
+        # Padding 0.7s
+        tail_padding = np.zeros(int(EXPECTED_SAMPLE_RATE * 0.7), dtype=np.float32)
         self.stream.accept_waveform(EXPECTED_SAMPLE_RATE, tail_padding)
         self.stream.input_finished()
         
