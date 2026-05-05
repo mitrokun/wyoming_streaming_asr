@@ -23,4 +23,6 @@ Latest Russian models from Alpha Cephei https://huggingface.co/alphacep/
 
 ---
 
-The streaming version of Parakeet (en) has been [released](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-int8-2026-01-14.tar.bz2). Run this model with the `--decoding-method greedy_search` option. The model was converted to onnx with the 1.12s [setting](https://huggingface.co/nvidia/multitalker-parakeet-streaming-0.6b-v1#setting-up-streaming-configuration).
+The streaming version of Nemotron (en) has been [released](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-int8-2026-01-14.tar.bz2). Run this model with the `--decoding-method greedy_search` option. The model was converted to onnx with the 1.12s [setting](https://huggingface.co/nvidia/multitalker-parakeet-streaming-0.6b-v1#setting-up-streaming-configuration).
+
+Мodel update https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25.tar.bz2
