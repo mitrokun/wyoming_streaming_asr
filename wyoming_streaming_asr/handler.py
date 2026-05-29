@@ -210,7 +210,7 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
             if not self.command_recognized:
                 current_stable_text = " ".join(stable_words)
                 if current_stable_text and current_stable_text != self.last_stable_text:
-                    delta_text = current_stable_text[len(self.last_stable_text) :].strip()
+                    delta_text = current_stable_text[len(self.last_stable_text) :]
                     if delta_text:
                         _LOGGER.debug("Δ: '%s'", delta_text)
                         await self.write_event(TranscriptChunk(text=delta_text).event())
