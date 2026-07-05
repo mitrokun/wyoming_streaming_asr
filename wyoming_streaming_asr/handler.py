@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+import re
 from typing import Set, List, Optional
 
 import numpy as np
@@ -16,77 +17,81 @@ from sherpa_onnx import OnlineRecognizer
 _LOGGER = logging.getLogger(__name__)
 EXPECTED_SAMPLE_RATE = 16000
 
+# ==========================================
+# NOISE AND SERVICE TOKENS FILTERING
+# ==========================================
+IGNORE_TOKENS = {"<noise>", "<music>"}
 
+def filter_noise_tokens(text: str) -> str:
+    """Removes service tokens from the text |nemotron3.5,vosk0.62|"""
+    for token in IGNORE_TOKENS:
+        text = text.replace(token, "")
+
+    text = re.sub(r'<[a-zA-Z]{2}-[a-zA-Z]{2}>', '', text)
+
+    return " ".join(text.split())
+
+
+# ==========================================
+# ADAPTIVE AGC WITH CALIBRATION
+# ==========================================
 class StreamAGC:
-    """
-    Simple Automatic Gain Control with Auto-Calibration.
-    Detects if the source is already normalized (DSP) or quiet (raw mic).
-    """
+    """Automatic Gain Control with hardware DSP detection."""
     def __init__(self, target_level=0.6, max_gain=30.0, min_gain=1.0):
         self.target_level = target_level
-        self.absolute_max_gain = max_gain
+        self.max_gain = max_gain
         self.min_gain = min_gain
-        
-        # Start with target_level to prevent noise bursts during calibration
-        self.current_peak_envelope = target_level 
-
-        # Calibration state
-        self.calib_peak = 0.0
         self.calib_frames = 12
+        self.calib_peak = 0.0
         self.is_calibrated = False
-        
-        # Threshold to detect pre-processed signals (-30dB for RespeakerLite)
-        # Record audio and check the silence level on your device 
-        self.dsp_threshold = 0.031 
-        
-        # Default to safe mode (gain x1.0) until proven otherwise
-        self.active_max_gain = 1.0 
+        self.loud_threshold = 0.031
+        self.current_peak_envelope = target_level
+        self.active_max_gain = 1.0
 
     def process(self, audio_chunk: np.ndarray) -> np.ndarray:
         if len(audio_chunk) == 0:
             return audio_chunk
-
         chunk_max = np.max(np.abs(audio_chunk))
-
-        # === 1. Calibration Phase ===
-        if self.calib_frames > 0:
+        
+        # Initial calibration phase
+        if not self.is_calibrated:
             self.calib_peak = max(self.calib_peak, chunk_max)
             self.calib_frames -= 1
+            if self.calib_frames <= 0 or self.calib_peak > self.loud_threshold:
+                self._finalize_calibration()
             return audio_chunk
-
-        # === 2. Source Type Detection (Run once) ===
-        if not self.is_calibrated:
-            if self.calib_peak > self.dsp_threshold:
-                # Loud source (DSP detected): Disable amplification
-                self.active_max_gain = 1.0
-            else:
-                # Quiet source (Raw Mic): Enable full gain
-                self.active_max_gain = self.absolute_max_gain
-                # Reset envelope to low value for immediate reaction
-                self.current_peak_envelope = 0.1
             
-            self.is_calibrated = True
-
-        # === 3. DSP Bypass ===
+        # If hardware DSP is detected, bypass processing
         if self.active_max_gain <= 1.0:
             return np.clip(audio_chunk, -1.0, 1.0)
-
-        # === 4. AGC Logic ===
-        # Fast attack, slow release
+            
         if chunk_max > self.current_peak_envelope:
             alpha = 0.5
+        elif chunk_max < 0.005:
+            alpha = 0.0
         else:
-            alpha = 0.01
-
+            alpha = 0.002
+            
         self.current_peak_envelope = (1 - alpha) * self.current_peak_envelope + alpha * chunk_max
         safe_envelope = max(self.current_peak_envelope, 1e-6)
-
         target_gain = self.target_level / safe_envelope
         final_gain = np.clip(target_gain, self.min_gain, self.active_max_gain)
-
         return np.tanh(audio_chunk * final_gain)
 
+    def _finalize_calibration(self):
+        self.is_calibrated = True
+        if self.calib_peak > self.loud_threshold:
+            self.active_max_gain = 1.0
+            _LOGGER.debug("AGC: Hardware DSP detected. AGC Passthrough.")
+        else:
+            self.active_max_gain = self.max_gain
+            self.current_peak_envelope = max(self.calib_peak, 0.05)
+            _LOGGER.debug(f"AGC: Raw mic detected. Dynamic AGC x{self.max_gain} ON.")
 
+
+# ==========================================
+# WYOMING EVENT HANDLER
+# ==========================================
 class SherpaOnnxEventHandler(AsyncEventHandler):
     """Event handler for each client using sherpa-onnx."""
 
@@ -111,9 +116,10 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
         self.language = self.cli_args.language
         self.stream = None
         self.last_stable_text = ""
+        self.last_full_text = ""  # Fallback buffer for accumulated text
         self.command_recognized = False
         self.check_performed = False
-        self.agc = StreamAGC(target_level=0.7, max_gain=30.0)
+        self.agc = StreamAGC(target_level=0.6, max_gain=30.0)
 
     async def handle_event(self, event: Event) -> bool:
         """Main method for handling incoming events."""
@@ -143,10 +149,11 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
         _LOGGER.debug("Audio stream started.")
         self.stream = self.recognizer.create_stream()
         self.last_stable_text = ""
+        self.last_full_text = ""  # Reset fallback buffer
         self.command_recognized = False
         self.check_performed = False
-        # Reset AGC for new phrase
-        self.agc = StreamAGC(target_level=0.7, max_gain=30.0)
+        # Reset AGC for new phrase (re-trigger calibration)
+        self.agc = StreamAGC(target_level=0.6, max_gain=30.0)
         await self.write_event(TranscriptStart(language=self.language).event())
 
     async def _finalize_recognition(self, text: str) -> None:
@@ -168,8 +175,11 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
         if not self.sorted_commands:
             return None
             
+        text_lower = text.lower()
         for command in self.sorted_commands:
-            if command in text:
+            # Exact word boundary matching
+            pattern = r'\b' + re.escape(command) + r'\b'
+            if re.search(pattern, text_lower):
                 return command
         return None
 
@@ -182,7 +192,7 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
             samples_int16 = np.frombuffer(audio_chunk_bytes, dtype=np.int16)
             samples_float32 = samples_int16.astype(np.float32) / 32768.0
             
-            # Apply AGC
+            # Apply dynamic AGC
             samples_float32 = self.agc.process(samples_float32)
 
             self.stream.accept_waveform(EXPECTED_SAMPLE_RATE, samples_float32)
@@ -190,10 +200,14 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
                 self.recognizer.decode_stream(self.stream)
             
             current_full_text = self.recognizer.get_result(self.stream).strip().lower()
+            current_full_text = filter_noise_tokens(current_full_text)
 
             if not current_full_text:
                 return
             
+            # Store the last non-empty clean text
+            self.last_full_text = current_full_text
+
             words = current_full_text.split()
             stable_words = words[:-1] if len(words) > 1 else words
 
@@ -235,6 +249,12 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
             self.recognizer.decode_stream(self.stream)
 
         final_text = self.recognizer.get_result(self.stream).strip()
+        final_text = filter_noise_tokens(final_text)
+        
+        # Fallback: if silence/endpoint wiped the text, use the accumulated stream text
+        if not final_text and self.last_full_text:
+            _LOGGER.debug("Final text empty due to silence, falling back to: '%s'", self.last_full_text)
+            final_text = self.last_full_text
         
         _LOGGER.debug("Full final text for checking: '%s'", final_text)
 
@@ -246,4 +266,3 @@ class SherpaOnnxEventHandler(AsyncEventHandler):
                 return
 
         await self._finalize_recognition(final_text)
-
